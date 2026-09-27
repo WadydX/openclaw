@@ -15,6 +15,7 @@ import { isOpenClawCliImageCachePath } from "../agents/embedded-agent-runner/run
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
 import { isImageMediaFact, readPersistedMediaFacts } from "../media/media-facts.js";
 import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
+import { dropJoinedToolTurnReplies } from "./cli-session-history.merge-tool-turns.js";
 
 const DEDUPE_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -173,47 +174,6 @@ function prepareComparableMessage(
     driftNoteText: comparableText.driftNoteText,
     timestamp: asFiniteNumber(record.timestamp),
   };
-}
-
-// A tool-split CLI turn is stored locally as one assistant row that joins every
-// pre-tool segment with the reply, while the native session keeps one row per
-// segment. No single imported row equals the joined row, so both would render
-// (#159707). Prefer the imported segments: they carry the tool boundaries.
-function dropLocalRowsCoveredByImportedTurns(
-  merged: ComparableHistoryMessage[],
-  importedEntries: readonly ComparableHistoryMessage[],
-  consumed: ReadonlySet<ComparableHistoryMessage>,
-): void {
-  const joinedTurnTexts = new Set<string>();
-  let segments: string[] = [];
-  const closeTurn = () => {
-    if (segments.length > 1) {
-      joinedTurnTexts.add(segments.join(" "));
-    }
-    segments = [];
-  };
-  for (const imported of importedEntries) {
-    if (imported.role === "user") {
-      closeTurn();
-    } else if (imported.role === "assistant" && imported.text) {
-      segments.push(imported.text);
-    }
-  }
-  closeTurn();
-  if (joinedTurnTexts.size === 0) {
-    return;
-  }
-  for (let index = merged.length - 1; index >= 0; index -= 1) {
-    const entry = merged[index]!;
-    if (
-      entry.role === "assistant" &&
-      entry.text &&
-      !consumed.has(entry) &&
-      joinedTurnTexts.has(entry.text)
-    ) {
-      merged.splice(index, 1);
-    }
-  }
 }
 
 // External identity survives text edits, so it is the strongest match signal
@@ -726,9 +686,7 @@ export function mergeImportedChatHistoryMessages(params: {
     changed = true;
     expanded = true;
   }
-  if (expanded) {
-    dropLocalRowsCoveredByImportedTurns(merged, importedEntries, consumedLocalCandidates);
-  }
+  changed = dropJoinedToolTurnReplies(merged, importedEntries, consumedLocalCandidates) || changed;
   if (!changed) {
     return params.localMessages;
   }
