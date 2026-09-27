@@ -789,6 +789,85 @@ describe("cli session history", () => {
     expect(merged).toEqual([{ ...localMessage, __openclaw: importedMeta }]);
   });
 
+  it("drops a local tool-split reply that joins the imported turn segments (#159707)", () => {
+    const meta = (externalId: string) => ({
+      __openclaw: { importedFrom: "claude-cli", cliSessionId: "session-1", externalId },
+    });
+    const turn = (base: number, id: string, segments: string[]) => [
+      { role: "user", content: `do ${id}`, timestamp: base, ...meta(`${id}-user`) },
+      ...segments.map((text, index) => ({
+        role: "assistant",
+        timestamp: base + (index + 1) * 10,
+        content: [
+          { type: "text", text },
+          ...(index < segments.length - 1
+            ? [{ type: "toolCall", id: `${id}-tool-${index}`, name: "exec", arguments: {} }]
+            : []),
+        ],
+        ...meta(`${id}-assistant-${index}`),
+      })),
+    ];
+    const first = ["Starting X.", "The batch was refused.", "Done: first."];
+    const second = ["Checking Y.", "Done: second."];
+    const localMessages = [
+      { role: "user", content: "do a", timestamp: 1_000 },
+      {
+        role: "assistant",
+        timestamp: 1_900,
+        content: [{ type: "text", text: first.join("\n\n") }],
+      },
+      { role: "user", content: "do b", timestamp: 2_000 },
+      {
+        role: "assistant",
+        timestamp: 2_900,
+        content: [{ type: "text", text: second.join("\n\n") }],
+      },
+    ];
+    const importedMessages = [...turn(1_000, "a", first), ...turn(2_000, "b", second)];
+
+    const merged = mergeImportedChatHistoryMessages({ localMessages, importedMessages });
+
+    const assistantTexts = merged
+      .map(readRecord)
+      .filter((message) => message.role === "assistant")
+      .map((message) =>
+        (message.content as Array<{ type: string; text?: string }>)
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join(""),
+      );
+    expect(assistantTexts).toEqual([...first, ...second]);
+  });
+
+  it("keeps a local reply that only joins segments across separate turns", () => {
+    const meta = (externalId: string) => ({
+      __openclaw: { importedFrom: "claude-cli", cliSessionId: "session-1", externalId },
+    });
+    const localMessages = [
+      { role: "assistant", timestamp: 5_000, content: [{ type: "text", text: "One.\n\nTwo." }] },
+    ];
+    const importedMessages = [
+      { role: "user", content: "first", timestamp: 1_000, ...meta("u1") },
+      {
+        role: "assistant",
+        timestamp: 1_100,
+        content: [{ type: "text", text: "One." }],
+        ...meta("a1"),
+      },
+      { role: "user", content: "second", timestamp: 2_000, ...meta("u2") },
+      {
+        role: "assistant",
+        timestamp: 2_100,
+        content: [{ type: "text", text: "Two." }],
+        ...meta("a2"),
+      },
+    ];
+
+    const merged = mergeImportedChatHistoryMessages({ localMessages, importedMessages });
+
+    expect(merged).toContain(localMessages[0]);
+  });
+
   it("prefers a literal note match and preserves the distinct unprefixed turn", () => {
     const literal = `${CLAUDE_RESUME_DRIFT_NOTES[0]}\n\nhello`;
     const localMessages = [

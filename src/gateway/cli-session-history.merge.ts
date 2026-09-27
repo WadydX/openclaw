@@ -175,6 +175,47 @@ function prepareComparableMessage(
   };
 }
 
+// A tool-split CLI turn is stored locally as one assistant row that joins every
+// pre-tool segment with the reply, while the native session keeps one row per
+// segment. No single imported row equals the joined row, so both would render
+// (#159707). Prefer the imported segments: they carry the tool boundaries.
+function dropLocalRowsCoveredByImportedTurns(
+  merged: ComparableHistoryMessage[],
+  importedEntries: readonly ComparableHistoryMessage[],
+  consumed: ReadonlySet<ComparableHistoryMessage>,
+): void {
+  const joinedTurnTexts = new Set<string>();
+  let segments: string[] = [];
+  const closeTurn = () => {
+    if (segments.length > 1) {
+      joinedTurnTexts.add(segments.join(" "));
+    }
+    segments = [];
+  };
+  for (const imported of importedEntries) {
+    if (imported.role === "user") {
+      closeTurn();
+    } else if (imported.role === "assistant" && imported.text) {
+      segments.push(imported.text);
+    }
+  }
+  closeTurn();
+  if (joinedTurnTexts.size === 0) {
+    return;
+  }
+  for (let index = merged.length - 1; index >= 0; index -= 1) {
+    const entry = merged[index]!;
+    if (
+      entry.role === "assistant" &&
+      entry.text &&
+      !consumed.has(entry) &&
+      joinedTurnTexts.has(entry.text)
+    ) {
+      merged.splice(index, 1);
+    }
+  }
+}
+
 // External identity survives text edits, so it is the strongest match signal
 // for imported messages from Claude CLI or similar external histories.
 function resolveImportedExternalIdentityKey(message: unknown): string | undefined {
@@ -614,9 +655,11 @@ export function mergeImportedChatHistoryMessages(params: {
   let changed = false;
   let expanded = false;
   let nextOrder = merged.length;
+  const importedEntries: ComparableHistoryMessage[] = [];
   for (const message of params.importedMessages) {
     const externalIdentityKey = resolveImportedExternalIdentityKey(message);
     const imported = prepareComparableMessage(message, nextOrder, externalIdentityKey);
+    importedEntries.push(imported);
     if (externalIdentityKey) {
       const exactIdentityMatch = exactExternalIdentityIndex.get(externalIdentityKey);
       if (exactIdentityMatch) {
@@ -682,6 +725,9 @@ export function mergeImportedChatHistoryMessages(params: {
     nextOrder += 1;
     changed = true;
     expanded = true;
+  }
+  if (expanded) {
+    dropLocalRowsCoveredByImportedTurns(merged, importedEntries, consumedLocalCandidates);
   }
   if (!changed) {
     return params.localMessages;
